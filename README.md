@@ -13,25 +13,57 @@ no replacement for `ssh`.
 
 ## Install
 
-Requires Herdr ≥ 0.9.0 and Python 3 locally. Linux and macOS.
+Requires Herdr ≥ 0.9.0 and Python 3. Linux and macOS.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ecylmz/herdr-drop/main/install.sh | sh
+```
+
+That installs the plugin and binds it to the first free key it finds —
+`prefix+u` on a stock config. It never overwrites an existing binding,
+and it backs up `config.toml` before touching it.
+
+Prefer to see what runs first? `curl -fsSL …/install.sh | less`, or do it by
+hand:
 
 ```bash
 herdr plugin install ecylmz/herdr-drop
 ```
 
-Then bind a key in `~/.config/herdr/config.toml` and run
-`herdr server reload-config`:
+There is nothing to build: the plugin is one Python script.
+
+<details>
+<summary>Binding the key yourself</summary>
+
+Add this to `~/.config/herdr/config.toml` and run `herdr server reload-config`:
 
 ```toml
 [[keys.command]]
-key = "prefix+shift+d"
+key = "prefix+u"
 type = "plugin_action"
 command = "herdr-drop.upload"
 description = "Upload dropped file"
 ```
 
 Check the key is free first — `herdr --default-config` lists Herdr's own
-bindings.
+bindings. `prefix+d` is detach, and `prefix+shift+d` is close_workspace, so the
+mnemonic key for a drop is only yours to take if you have moved that one.
+
+</details>
+
+<details>
+<summary>From source, for development</summary>
+
+```bash
+git clone https://github.com/ecylmz/herdr-drop
+cd herdr-drop
+herdr plugin link "$PWD"
+```
+
+`./herdr-drop --test` runs the self-checks. A linked plugin cannot be installed
+over — `herdr plugin unlink herdr-drop` first.
+
+</details>
 
 ## Use
 
@@ -80,22 +112,6 @@ Binary-safe: the file is base64-encoded before it enters the terminal, so
 control characters never reach the remote line discipline.
 
 <details>
-<summary>From source, for development</summary>
-
-```bash
-git clone https://github.com/ecylmz/herdr-drop
-cd herdr-drop
-herdr plugin link "$PWD"
-```
-
-There is no build step. `./herdr-drop --test` runs the self-checks.
-
-A linked plugin cannot be installed over — `herdr plugin unlink herdr-drop`
-first.
-
-</details>
-
-<details>
 <summary>Why a key and not the drop itself</summary>
 
 Herdr has no hook for a paste or a drop, and its link handlers only match
@@ -104,13 +120,29 @@ puts the path on the prompt, and the key turns it into a transfer.
 
 </details>
 
+## Update
+
+Herdr has no `plugin update`; reinstalling refreshes the managed checkout.
+Rerun the installer, or:
+
+```bash
+herdr plugin install ecylmz/herdr-drop
+```
+
+Your key binding is left in place. For a linked checkout, `git pull` instead.
+
 ## Uninstall
 
 ```bash
-herdr plugin uninstall herdr-drop
+curl -fsSL https://raw.githubusercontent.com/ecylmz/herdr-drop/main/install.sh | sh -s -- --uninstall
 ```
 
-Remove the `[[keys.command]]` block you added and reload the config.
+From a checkout, `./uninstall.sh` does the same — it is a symlink to
+`install.sh`, which reads its own name. (Over a pipe there is no name to read,
+hence the flag.)
+
+This removes the plugin and the key binding the installer added, and nothing
+else. The plugin keeps no state of its own.
 
 ## License
 
