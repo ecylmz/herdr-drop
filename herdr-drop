@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Upload a file dropped on a Herdr pane into that pane's current directory.
+
+A terminal drop only pastes the file's path into the pane. This script reads
+that path, clears the prompt line, starts `base64 -d > file` on the other side
+and streams the data through the same pty into its stdin. The data never
+reaches the shell's line editor, so nothing is echoed to the pane; progress is
+drawn in a Herdr popup instead.
+
+When the last chunk is handed over, `cksum` runs on the far side and its output
+is compared with the local `cksum`. The check mark only appears on a match.
+
+ponytail: the bar counts bytes handed to Herdr, which can run a few hundred KB
+ahead of the pty; the closing checksum is the part that tells the truth. The
+whole transfer rides the terminal, so above ~5 MB use scp.
+"""
+import base64, json, os, re, shlex, shutil, subprocess, sys, time, urllib.parse
+
+LINE = 3000   # stay under the pty's canonical line limit (~4096)
+BLOCK = 12    # lines per herdr call; each call costs a process spawn
+BAR = 28      # upper bound; a narrow popup shortens the bar
+SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+def herdr(*a):
+    return subprocess.run(["herdr", *a], capture_output=True, text=True, check=True).stdout
+
+def pick_path(text):
+    """The last path in the pane text that is a local file."""
+    for a, b, c in reversed(re.findall(r"'([^']+)'|\"([^\"]+)\"|(\S+)", text)):
+        cand = a or b or c
+        if cand.startswith("file://"):
+            cand = urllib.parse.unquote(urllib.parse.urlparse(cand).path)
+        cand = os.path.expanduser(cand)
+        if os.path.isfile(cand):
+            return cand
+    return None
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+def cols():
+    return shutil.get_terminal_size((80, 24)).columns
+
+def status(text):
+    """Redraw one line in place: wipe it, then write over it."""
+    sys.stdout.write("\033[2K\r" + text)
+    sys.stdout.flush()
+
+def draw(done, total, started):
+    elapsed = max(time.monotonic() - started, 1e-6)
+    rate = done / elapsed
+    frac = done / total if total else 1.0
+    eta = (total - done) / rate if rate else 0
+    info = f"{frac * 100:3.0f}%  {human(done)} / {human(total)}  {human(rate)}/s  ETA {eta:3.0f}s"
+    # keep it on one line: a narrow popup shrinks the bar, then trims the text
+    width = max(6, min(BAR, cols() - len(info) - 6))
+    filled = int(width * frac)
+    info = info[:max(0, cols() - 4 - width)]
+    status(f"  \033[36m{'█' * filled}\033[0m{'░' * (width - filled)} {info}")
+
+def upload(pane, path):
+    data = base64.b64encode(open(path, "rb").read()).decode()
+    total, name = os.path.getsize(path), os.path.basename(path)
+    title = json.loads(herdr("pane", "get", pane))["result"]["pane"].get("terminal_title_stripped", pane)
+
+    print(f"\n  \033[1m{name}\033[0m  {human(total)}\n  → {title[:cols() - 4]}\n")
+    herdr("pane", "send-keys", pane, "ctrl+u")
+    # base64 reads the pty directly, so the shell's line editor is out of the
+    # way and `stty -echo` holds. cksum goes on the same command line: typing a
+    # second command while echo is off leaves a duplicate line in the pane.
+    q = shlex.quote(name)
+    herdr("pane", "run", pane, f"stty -echo; base64 -d > {q}; stty echo; cksum {q}")
+    time.sleep(0.3)
+
+    lines = [data[i:i + LINE] for i in range(0, len(data), LINE)]
+    started = time.monotonic()
+    for i in range(0, len(lines), BLOCK):
+        herdr("pane", "send-text", pane, "\n".join(lines[i:i + BLOCK]) + "\n")
+        sent = min(len(lines), i + BLOCK) / len(lines)
+        draw(int(sent * total), total, started)
+    herdr("pane", "send-keys", pane, "ctrl+d")  # EOF for base64
+    draw(total, total, started)
+    print()  # leave the bar up; the wait spins on the line below it
+
+    got, want = verify(pane, path, name, total)
+    elapsed = time.monotonic() - started
+    if got == want:
+        status(f"  \033[32m✓\033[0m {human(total)} · {elapsed:.1f} s · "
+               f"{human(total / elapsed)}/s · cksum ✓\n")
+        time.sleep(3)
+        return 0
+    status(f"  \033[31m✗ not verified\033[0m · local {want} · remote {got or 'no answer'}"
+           f"\n  the file may be truncated or corrupt: {name}\n")
+    time.sleep(8)
+    return 1
+
+def verify(pane, path, name, total):
+    """Wait for the remote cksum line and compare it with the local one.
+
+    POSIX cksum gives the same CRC on Linux and macOS."""
+    want = " ".join(subprocess.run(["cksum", path], capture_output=True, text=True,
+                                   check=True).stdout.split()[:2])
+    budget = max(30.0, total / 50_000)  # the pty buffer has to drain within this too
+    proc = subprocess.Popen(
+        ["herdr", "pane", "wait-output", pane, "--source", "recent-unwrapped", "--lines", "6",
+         "--timeout", str(int(budget * 1000)),
+         "--regex", rf"(?m)^\d+ \d+ {re.escape(name)}\s*$"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+
+    # on a large file this wait is long enough to need saying so
+    started, i = time.monotonic(), 0
+    while proc.poll() is None:
+        waited = time.monotonic() - started
+        status(f"  {SPIN[i % len(SPIN)]} waiting for remote cksum… "
+               f"{waited:.0f}s/{budget:.0f}s"[:cols() - 1])
+        time.sleep(0.12)
+        i += 1
+    out = proc.stdout.read()
+    if proc.returncode != 0:
+        return None, want
+    return " ".join(json.loads(out)["result"]["matched_line"].split()[:2]), want
+
+def main():
+    pane, path = os.environ.get("HERDR_DROP_PANE"), os.environ.get("HERDR_DROP_FILE")
+    if pane and path:  # we are the popup
+        return upload(pane, path)
+
+    ctx = json.loads(os.environ.get("HERDR_PLUGIN_CONTEXT_JSON") or "{}")
+    pane = (sys.argv[1] if len(sys.argv) > 1 else ctx.get("focused_pane_id")
+            or json.loads(herdr("pane", "current"))["result"]["pane"]["pane_id"])
+    # unwrapped, or a long path arrives split across display rows
+    path = pick_path(herdr("pane", "read", pane, "--source", "recent-unwrapped",
+                           "--lines", "5", "--format", "text"))
+    if not path:
+        herdr("notification", "show", "herdr-drop", "--body", "no local file path on the pane")
+        return 1
+    herdr("plugin", "pane", "open", "--plugin", "herdr-drop", "--entrypoint", "progress",
+          "--env", f"HERDR_DROP_PANE={pane}", "--env", f"HERDR_DROP_FILE={path}")
+    return 0
+
+def test():
+    assert pick_path("~ ❯ /etc/hostname") == "/etc/hostname"
+    assert pick_path("$ 'file:///etc/host name'") is None
+    assert pick_path("$ file:///etc/hostname") == "/etc/hostname"
+    assert pick_path("$ /etc/hostname /no/such/file") == "/etc/hostname"
+    assert pick_path("~ ❯ ") is None
+    assert human(512) == "512 B" and human(1536) == "1.5 KB"
+    print("ok")
+
+if __name__ == "__main__":
+    sys.exit(test() if "--test" in sys.argv else main())

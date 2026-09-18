@@ -1,0 +1,29 @@
+id = "herdr-drop"
+name = "Drop Upload"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Upload a file dropped on a pane into that pane's current directory"
+platforms = ["linux", "macos"]
+
+# A terminal drop only pastes the file's path into the pane; this action reads
+# that path and streams the file through the same pty, so an ssh pane receives
+# it in the remote working directory. Bind it with:
+#   [[keys.command]]
+#   key = "prefix+shift+d"
+#   type = "plugin_action"
+#   command = "herdr-drop.upload"
+# The transfer screen. A popup leaves the tiled layout alone and closes as soon
+# as the command exits.
+[[panes]]
+id = "progress"
+title = "Drop Upload"
+placement = "popup"
+width = "56%"
+height = "26%"
+command = ["./herdr-drop"]
+
+[[actions]]
+id = "upload"
+title = "Upload dropped file"
+description = "Send the file path on the focused pane's prompt to that pane's shell"
+command = ["./herdr-drop"]
