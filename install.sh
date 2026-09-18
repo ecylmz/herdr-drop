@@ -30,7 +30,7 @@ mode() {
 }
 
 require_herdr() {
-    command -v herdr >/dev/null 2>&1 || die "herdr is not on PATH — see https://herdr.dev"
+    command -v herdr >/dev/null 2>&1 || die "herdr is not on PATH, see https://herdr.dev"
     command -v python3 >/dev/null 2>&1 || die "python3 is not on PATH"
     version=$(herdr --version 2>/dev/null | awk '{print $NF}')
     case "$version" in
@@ -106,7 +106,7 @@ case $(mode "$@") in
         herdr plugin install "$REPO" -y
         bind_key
         reload
-        say "done — drop a file on a pane, then press the key above, or:"
+        say "done. Drop a file on a pane, then press the key above, or:"
         say "  herdr plugin action invoke $ACTION"
         ;;
     uninstall)
@@ -115,6 +115,6 @@ case $(mode "$@") in
             herdr plugin unlink "$PLUGIN" 2>/dev/null ||
             say "plugin was not installed"
         reload
-        say "removed. Nothing else was touched — the plugin keeps no state."
+        say "removed. Nothing else was touched. The plugin keeps no state."
         ;;
 esac
